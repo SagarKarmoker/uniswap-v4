@@ -37,7 +37,6 @@ interface ISwapRouter {
         address tokenOut;
         uint24 fee;
         address recipient;
-        uint256 deadline;
         uint256 amountIn;
         uint256 amountOutMinimum;
         uint160 sqrtPriceLimitX96;
@@ -75,6 +74,7 @@ interface IAerodromeRouter {
         address from;
         address to;
         bool stable;
+        address factory;
     }
 
     function swapExactTokensForTokens(
@@ -110,6 +110,7 @@ contract UniswapV3FlashLoan is IUniswapV3FlashCallback {
     IAerodromeRouter public aeroRouter;
     IUniswapV3Factory public factory;
     IQuoter public quoter;
+    address public aeroFactory;
 
     modifier onlyOwner() {
         require(msg.sender == owner, "not owner");
@@ -135,14 +136,16 @@ contract UniswapV3FlashLoan is IUniswapV3FlashCallback {
         address _uniRouter,
         address _aeroRouter,
         address _factory,
-        address _quoter
+        address _quoter,
+        address _aeroFactory
     ) {
         require(
             _flashPool != address(0) &&
                 _uniRouter != address(0) &&
                 _aeroRouter != address(0) &&
                 _factory != address(0) &&
-                _quoter != address(0),
+                _quoter != address(0) &&
+                _aeroFactory != address(0),
             "zero address"
         );
 
@@ -152,6 +155,7 @@ contract UniswapV3FlashLoan is IUniswapV3FlashCallback {
         aeroRouter = IAerodromeRouter(_aeroRouter);
         factory = IUniswapV3Factory(_factory);
         quoter = IQuoter(_quoter);
+        aeroFactory = _aeroFactory;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -238,37 +242,32 @@ contract UniswapV3FlashLoan is IUniswapV3FlashCallback {
         require(f.borrowToken == startToken, "borrow token mismatch");
 
         /*//////////////////////////////////////////////////////////////
-                        1️⃣ SIMPLIFIED ARBITRAGE (Pre-funded Model)
+                        1️⃣ EXECUTE ARBITRAGE SWAPS
         //////////////////////////////////////////////////////////////*/
         
-        // Strategy: Contract is pre-funded with targetToken (AERO)
-        // We sell it on Aerodrome to get back startToken (WETH)
-        // This demonstrates flash loan mechanism without complex routing
+        // Step 1: Swap borrowed token to target token
+        // If buyOnUni: buy AERO on Uniswap, sell on Aerodrome
+        // If not buyOnUni: buy AERO on Aerodrome, sell on Uniswap
         
-        // Check how much targetToken (AERO) we have
-        uint256 targetBal = IERC20(targetToken).balanceOf(address(this));
+        uint256 targetAmount;
         
-        if (targetBal > 0) {
-            // Sell targetToken for startToken on Aerodrome
-            IERC20(targetToken).forceApprove(address(aeroRouter), targetBal);
-            IAerodromeRouter.Route[] memory routes = new IAerodromeRouter.Route[](1);
-            routes[0] = IAerodromeRouter.Route({
-                from: targetToken, 
-                to: startToken, 
-                stable: f.stable
-            });
+        if (f.buyOnUni) {
+            // Buy targetToken on Uniswap using borrowed WETH
+            uint24 uniFee = _resolveTradeFee(startToken, targetToken);
+            targetAmount = _swapOnUniswap(startToken, targetToken, f.amountIn, uniFee);
             
-            try aeroRouter.swapExactTokensForTokens(
-                targetBal,
-                1,  // minimum out (accept any amount for demo)
-                routes,
-                address(this),
-                block.timestamp + 100
-            ) returns (uint256[] memory) {
-                // success - we now have more startToken
-            } catch {
-                // If swap fails, try to repay from existing balance
-                // This handles edge cases gracefully
+            // Sell targetToken on Aerodrome for WETH
+            if (targetAmount > 0) {
+                _swapOnAerodrome(targetToken, startToken, targetAmount, f.stable);
+            }
+        } else {
+            // Buy targetToken on Aerodrome using borrowed WETH
+            targetAmount = _swapOnAerodrome(startToken, targetToken, f.amountIn, f.stable);
+            
+            // Sell targetToken on Uniswap for WETH
+            if (targetAmount > 0) {
+                uint24 uniFee = _resolveTradeFee(targetToken, startToken);
+                _swapOnUniswap(targetToken, startToken, targetAmount, uniFee);
             }
         }
 
@@ -309,7 +308,6 @@ contract UniswapV3FlashLoan is IUniswapV3FlashCallback {
                 tokenOut: tokenOut,
                 fee: fee,
                 recipient: address(this),
-                deadline: block.timestamp + 100,
                 amountIn: amountIn,
                 amountOutMinimum: 1,
                 sqrtPriceLimitX96: 0
@@ -329,7 +327,8 @@ contract UniswapV3FlashLoan is IUniswapV3FlashCallback {
         routes[0] = IAerodromeRouter.Route({
             from: tokenIn,
             to: tokenOut,
-            stable: stable
+            stable: stable,
+            factory: aeroFactory
         });
 
         uint256[] memory amounts = aeroRouter.swapExactTokensForTokens(
