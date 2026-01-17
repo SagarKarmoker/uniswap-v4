@@ -26,6 +26,7 @@ interface SwapConfig {
     hooks: string;
   };
   amountIn: string;
+  zeroForOne?: boolean;
   slippagePercent?: number;
   deadlineMinutes?: number;
 }
@@ -35,44 +36,55 @@ async function swap(config: SwapConfig) {
   const signer = new ethers.Wallet(PRIVATE_KEY, provider);
   const swapper = new ethers.Contract(SWAPPER_ADDRESS, SWAPPER_ABI, signer);
 
-  const isETHInput = config.poolKey.currency0 === ethers.ZeroAddress;
-  const tokenOut = config.poolKey.currency1;
+  const zeroForOne = config.zeroForOne ?? true;
+  const tokenIn = zeroForOne ? config.poolKey.currency0 : config.poolKey.currency1;
+  const tokenOut = zeroForOne ? config.poolKey.currency1 : config.poolKey.currency0;
+  const isETHInput = tokenIn === ethers.ZeroAddress;
 
-  let tokenOutDecimals = 18,
-    tokenOutSymbol = "TOKEN";
+  let tokenInDecimals = 18, tokenInSymbol = "ETH";
+  let tokenOutDecimals = 18, tokenOutSymbol = "TOKEN";
+
+  if (tokenIn !== ethers.ZeroAddress) {
+    const tokenInContract = new ethers.Contract(tokenIn, ERC20_ABI, provider);
+    tokenInDecimals = await tokenInContract.decimals();
+    tokenInSymbol = await tokenInContract.symbol();
+  }
+
   if (tokenOut !== ethers.ZeroAddress) {
-    const tokenContract = new ethers.Contract(tokenOut, ERC20_ABI, provider);
-    tokenOutDecimals = await tokenContract.decimals();
-    tokenOutSymbol = await tokenContract.symbol();
+    const tokenOutContract = new ethers.Contract(tokenOut, ERC20_ABI, provider);
+    tokenOutDecimals = await tokenOutContract.decimals();
+    tokenOutSymbol = await tokenOutContract.symbol();
+  }
+
+  const amountIn = ethers.parseUnits(config.amountIn, tokenInDecimals);
+
+  // Approve if ERC20 input
+  if (!isETHInput) {
+    const tokenInContract = new ethers.Contract(tokenIn, [...ERC20_ABI, "function approve(address,uint256) returns (bool)"], signer);
+    const approveTx = await tokenInContract.approve(SWAPPER_ADDRESS, amountIn);
+    await approveTx.wait();
+    console.log(`✅ Approved ${config.amountIn} ${tokenInSymbol}`);
   }
 
   const balanceBefore =
     tokenOut === ethers.ZeroAddress
       ? await provider.getBalance(signer.address)
-      : await new ethers.Contract(tokenOut, ERC20_ABI, provider).balanceOf(
-          signer.address
-        );
+      : await new ethers.Contract(tokenOut, ERC20_ABI, provider).balanceOf(signer.address);
 
   console.log(
-    `💰 Before: ${ethers.formatUnits(
-      balanceBefore,
-      tokenOutDecimals
-    )} ${tokenOutSymbol}`
+    `💰 Before: ${ethers.formatUnits(balanceBefore, tokenOutDecimals)} ${tokenOutSymbol}`
   );
 
-  const amountIn = ethers.parseEther(config.amountIn);
   const deadline =
     Math.floor(Date.now() / 1000) + (config.deadlineMinutes || 10) * 60;
 
   console.log(
-    `🔄 Swapping ${config.amountIn} ${
-      isETHInput ? "ETH" : "TOKEN"
-    } → ${tokenOutSymbol}...`
+    `🔄 Swapping ${config.amountIn} ${tokenInSymbol} → ${tokenOutSymbol}...`
   );
 
   const tx = await swapper.swapExactInputSingle(
     config.poolKey,
-    true,
+    zeroForOne,
     amountIn,
     0,
     deadline,
@@ -104,27 +116,34 @@ async function swap(config: SwapConfig) {
 }
 
 async function main() {
-  //   await swap({
-  //     poolKey: {
-  //       currency0: ethers.ZeroAddress,
-  //       currency1: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-  //       fee: 3000,
-  //       tickSpacing: 60,
-  //       hooks: ethers.ZeroAddress
-  //     },
-  //     amountIn: "0.01"
-  //   });
-
+  // ✅ ETH → USDC (works)
   await swap({
     poolKey: {
       currency0: ethers.ZeroAddress,
-      currency1: "0xfca95aeb5bf44ae355806a5ad14659c940dc6bf7",
-      fee: 19900,
-      tickSpacing: 398,
-      hooks: ethers.ZeroAddress,
+      currency1: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      fee: 3000,
+      tickSpacing: 60,
+      hooks: ethers.ZeroAddress
     },
-    amountIn: "1",
+    amountIn: "0.01",
+    zeroForOne: true
   });
+
+  // ⚠️ USDC → ETH currently not working
+  // Error: The contract's SETTLE_ALL/TAKE_ALL encoding needs fixing
+  // for ERC20 → ETH swaps (CurrencyNotSettled error 0xd81b2f2e)
+  
+  // await swap({
+  //   poolKey: {
+  //     currency0: ethers.ZeroAddress,
+  //     currency1: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  //     fee: 3000,
+  //     tickSpacing: 60,
+  //     hooks: ethers.ZeroAddress
+  //   },
+  //   amountIn: "10", // 10 USDC
+  //   zeroForOne: false
+  // });
 }
 
 main().catch(console.error);
