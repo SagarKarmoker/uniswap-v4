@@ -27,7 +27,7 @@ contract DebugSwapTest is Test {
     address constant UNI_ROUTER = 0x2626664c2603336E57B271c5C0b26F421741e481;
     
     function setUp() public {
-        vm.createSelectFork(vm.envString("BASE_RPC_URL"));
+        vm.createSelectFork(vm.envString("FORK_RPC_URL"));
     }
     
     function testDirectSwap() public {
@@ -67,3 +67,5 @@ contract DebugSwapTest is Test {
         }
     }
 }
+
+// forge test --match-path test/flashloan/debugswap.t.so -vvvv

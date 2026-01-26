@@ -49,7 +49,7 @@ contract UniswapV3FlashLoanTest is Test {
 
     function setUp() public {
         // Fork Base mainnet
-        vm.createSelectFork(vm.envString("BASE_RPC_URL"));
+        vm.createSelectFork(vm.envString("FORK_RPC_URL"));
 
         POOL = vm.envAddress("POOL_ADDRESS");
         UNI_ROUTER = vm.envAddress("UNI_ROUTER");
@@ -273,3 +273,5 @@ contract UniswapV3FlashLoanTest is Test {
         console.log("\n======================================\n");
     }
 }
+
+// forge test --match-path test/flashloan/uniswapflashloan.t.sol -vvvv
